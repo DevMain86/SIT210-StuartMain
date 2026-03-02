@@ -48,19 +48,6 @@ A simple assisted‑living lighting controller for an Arduino Nano 33 IoT. Press
 
 ---
 
-## Why modular programming was useful for this task
-Modularisation separated concerns into input handling, timing, activation, and hardware setup. This made it straightforward to test each part independently: the timing logic in `updateTimers()` was verified by manually setting end times, and the button logic was validated by isolating `readButtonDebounced()`. Because functions have single responsibilities, replacing the button with a presence sensor or adding a relay for mains control requires changes only in the relevant module, not across the whole program. This reduced debugging time and made the code easier to document and extend for future features.
-
----
-
-## Design considerations and limitations
-- **Button behavior:** current implementation restarts both timers on every press. If you prefer a single press to be ignored while lights are active, change the press handler to only activate when both lights are off.  
-- **Power loss:** timers reset on power loss. If persistence across power cycles is required, add nonvolatile storage and safe state recovery.  
-- **Scaling to mains lighting:** do not connect mains directly to the Arduino. Use a properly rated relay or SSR with isolation and follow electrical safety standards.  
-- **Accessibility:** consider larger tactile switches or audible feedback for users with limited dexterity or vision.
-
----
-
 ## Testing checklist
 - Confirm **pin mapping** in code matches wiring.  
 - Verify each LED lights when its pin is toggled in a simple blink sketch.  
@@ -68,7 +55,4 @@ Modularisation separated concerns into input handling, timing, activation, and h
 - Test repeated presses to confirm restart behavior or change logic if you want presses ignored while active.
 
 ---
-
-## Safety note
-This project controls low‑voltage LEDs only. For real household lighting use a correctly rated relay or SSR with galvanic isolation and follow local electrical codes. Never wire mains directly to the Arduino or breadboard.
 
