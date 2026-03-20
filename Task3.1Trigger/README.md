@@ -6,15 +6,15 @@ An Arduino Nano 33 IoT reads ambient illuminance from a BH1750 light sensor and 
 ---
 
 ## Hardware used
--- **Board:** Arduino Nano 33 IoT
--- **Sensors:** BH1750 I2C Light Sensor
--- **Display:** UCTRONICS 0.96 Inch OLED Module
--- **Other:** Breadboard, jumper wires, USB cable
+- **Board:** Arduino Nano 33 IoT
+- **Sensors:** BH1750 I2C Light Sensor
+- **Display:** UCTRONICS 0.96 Inch OLED Module
+- **Other:** Breadboard, jumper wires, USB cable
 
 ## Wiring summary
--- **BH1750:** - VCC → 3.3 V; GND → GND; SDA → SDA (A4); SCL → SCL (A5).
--- **OLED:** - VCC → 3.3 V; GND → GND; SDA → SDA (A4); SCL → SCL (A5).
--- Both I²C devices share the same SDA/SCL lines; ensure modules use the same I²C address (commonly 0x3C). Use pull‑ups only if modules require them.
+- **BH1750:** - VCC → 3.3 V; GND → GND; SDA → SDA (A4); SCL → SCL (A5).
+- **OLED:** - VCC → 3.3 V; GND → GND; SDA → SDA (A4); SCL → SCL (A5).
+- Both I²C devices share the same SDA/SCL lines; ensure modules use the same I²C address (commonly 0x3C). Use pull‑ups only if modules require them.
 
 ## How to run
 1. Copy arduino_secrets.example.h to arduino_secrets.h and fill in WIFI_SSID, WIFI_PASS, IFTTT_KEY, IFTTT_EVENT_START, IFTTT_EVENT_STOP.
@@ -42,4 +42,3 @@ An Arduino Nano 33 IoT reads ambient illuminance from a BH1750 light sensor and 
 - **IFTTT delivery:** after a 200 OK response, check IFTTT → Activity and the recipient email.
 - **Debounce tuning:** adjust SUN_THRESHOLD_LUX and DEBOUNCE_REQUIRED to avoid false triggers from brief flickers.
 - **Wi‑Fi resilience:** test with Wi‑Fi disconnected and reconnected to ensure the sketch handles skipped sends and reconnect attempts.
-- 
