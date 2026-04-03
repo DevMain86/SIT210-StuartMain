@@ -1,0 +1,168 @@
+[
+    {
+        "id": "http_in",
+        "type": "http in",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "API Command (POST)",
+        "url": "/api/command",
+        "method": "post",
+        "upload": false,
+        "skipBodyParsing": false,
+        "swaggerDoc": "",
+        "x": 160,
+        "y": 120,
+        "wires": [
+            [
+                "parse_json"
+            ]
+        ]
+    },
+    {
+        "id": "parse_json",
+        "type": "json",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "Parse JSON body",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 360,
+        "y": 120,
+        "wires": [
+            [
+                "auth_check"
+            ]
+        ]
+    },
+    {
+        "id": "auth_check",
+        "type": "function",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "Auth & validate",
+        "func": "// Auth, parse payload, and forward to Arduino (paste exactly)\nconst EXPECTED = (typeof env !== 'undefined' && env.get('RELAY_API_KEY')) || 'a517604f0c112f1082111d058ed249ac';\n\ntry { node.warn(\"Headers: \" + JSON.stringify(msg.req && msg.req.headers || {})); } catch (e) { }\ntry { node.warn(\"Raw payload: \" + JSON.stringify(msg.payload)); } catch (e) { }\n\n// Parse payload if it's a string\nif (typeof msg.payload === 'string') {\n  try { msg.payload = JSON.parse(msg.payload); }\n  catch (e) {\n    msg.statusCode = 400; msg.payload = { ok: false, error: 'Invalid JSON' }; return [null, msg];\n  }\n}\n\n// Show parsed payload for debugging\ntry { node.warn(\"Parsed payload: \" + JSON.stringify(msg.payload)); } catch (e) { }\n\nconst body = msg.payload || {};\nif (!body.room || !body.action) {\n  msg.statusCode = 400; msg.payload = { ok: false, error: 'Missing room or action' }; return [null, msg];\n}\n\n// Auth check\nconst auth = (msg.req && msg.req.headers && msg.req.headers.authorization) || '';\nif (!auth || !auth.startsWith('Bearer ')) {\n  msg.statusCode = 401; msg.payload = { ok: false, error: 'Missing Authorization' }; return [null, msg];\n}\nconst key = auth.slice(7).trim();\nif (key !== EXPECTED) {\n  msg.statusCode = 401; msg.payload = { ok: false, error: 'Unauthorized', gotKey: key }; return [null, msg];\n}\n\n// Build forward request\nmsg.method = 'POST';\nmsg.url = 'http://192.168.0.196:8080/command'; // <- ensure this matches the IP printed by the Arduino Serial Monitor\nmsg.headers = { 'Content-Type': 'application/json' };\nmsg.payload = { room: body.room, action: body.action, timer: Number(body.timer) || 0 };\n\n// Final debug\ntry { node.warn(\"Forwarding to: \" + msg.url + \" payload: \" + JSON.stringify(msg.payload)); } catch (e) { }\n\nreturn [msg, null];",
+        "outputs": 3,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 120,
+        "wires": [
+            [
+                "http_request"
+            ],
+            [
+                "http_response_error"
+            ],
+            [
+                "72aaaa2d6d3b2b38"
+            ]
+        ]
+    },
+    {
+        "id": "http_request",
+        "type": "http request",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "Forward to Arduino",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 800,
+        "y": 120,
+        "wires": [
+            [
+                "format_response",
+                "debug_node"
+            ]
+        ]
+    },
+    {
+        "id": "format_response",
+        "type": "function",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "Format OK response",
+        "func": "// msg.payload contains device response (text). Try parse JSON\nlet deviceResp = null;\ntry { deviceResp = JSON.parse(msg.payload); } catch(e) { deviceResp = msg.payload; }\nmsg.res = msg.res || {};\nmsg.statusCode = 200;\nmsg.payload = { ok: true, device: deviceResp };\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "x": 1040,
+        "y": 120,
+        "wires": [
+            [
+                "http_response_ok"
+            ]
+        ]
+    },
+    {
+        "id": "http_response_ok",
+        "type": "http response",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "HTTP 200",
+        "statusCode": "",
+        "headers": {},
+        "x": 1260,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "http_response_error",
+        "type": "function",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "Send error response",
+        "func": "msg.res = msg.res || {};\nmsg.statusCode = msg.statusCode || 500;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "x": 860,
+        "y": 220,
+        "wires": [
+            [
+                "http_response_ok"
+            ]
+        ]
+    },
+    {
+        "id": "debug_node",
+        "type": "debug",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1040,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "72aaaa2d6d3b2b38",
+        "type": "debug",
+        "z": "1a2b3c4d5e6f7g8h",
+        "name": "debug A",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 720,
+        "y": 40,
+        "wires": []
+    }
+]
