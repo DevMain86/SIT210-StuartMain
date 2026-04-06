@@ -26,7 +26,7 @@ A Raspberry Pi GUI that extends the Task 5.1 controller by adding PWM intensity 
 ## Files included in this folder
 - `5.2C_GUI.py` — main Python GUI script (Tkinter + gpiozero).
 - `README.md` — this file.  
-- `YouTube video link`: 
+- `YouTube video link`: https://youtu.be/UHsh8ykR8Bw 
 
 ## Code overview — what each part does
 - **Imports and GPIO mode:** imports tkinter, gpiozero.LED, and RPi.GPIO, and sets GPIO numbering to BCM for consistency with the wiring.
