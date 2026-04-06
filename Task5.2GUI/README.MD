@@ -20,7 +20,7 @@ A Raspberry Pi GUI that extends the Task 5.1 controller by adding PWM intensity 
 1. Ensure Raspberry Pi OS is installed and your Pi is up to date.
 2. Install required Python packages (if not already present).
 3. Save the GUI script as 5.1P_GUI.py in your project folder.
-4. Run the GUI (use sudo if your system requires it for GPIO access): sudo python3 5.1P_GUI.py
+4. Run the GUI (use sudo if your system requires it for GPIO access): sudo python3 5.2C_GUI.py
 5. In the GUI: Select a room radio button to mark that room as selected (the toggle button will immediately show the selected room). For Living Room, use the slider to change intensity (0–100% maps to PWM duty cycle 0.0–1.0). Use Toggle Selected LED to toggle the selected room (for Living Room this toggles between 0 and the slider value). Click Exit to clean up GPIO and close the app.
 
 ## Files included in this folder
