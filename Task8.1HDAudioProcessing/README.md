@@ -31,7 +31,7 @@ The Raspberry Pi captures microphone audio, runs an offline Vosk recogniser, map
 - `README.md` - this file.  
 - `YouTube video link` - https://youtu.be/9GZc3fEtlRw
 
-## Code overview — what each part does
+## Code overview - what each part does
 **Raspberry Pi**
 - **Dependencies:** vosk (offline ASR), sounddevice (microphone capture), bleak (BLE client), plus asyncio, threading, queue, json, time, glob.
 - **Audio capture:** sounddevice.RawInputStream with a minimal callback that pushes raw audio blocks into a queue for the main loop.
