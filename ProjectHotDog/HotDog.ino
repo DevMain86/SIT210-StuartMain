@@ -14,7 +14,7 @@
 // Serial and timing constants
 // TELEMETRY_INTERVAL_MS: how often telemetry is sent to the Pi.
 // DHT_INTERVAL_MS: minimum interval between DHT reads (DHT22 requires 2s).
-// HEARTBEAT_TIMEOUT_MS: how long the Arduino will wait for a Pi heartbeat before falling back to safe default.
+// HEARTBEAT_TIMEOUT_MS: how long the Arduino will wait for a Pi heartbeat before falling back to autonomous thermostat mode.
 // PRESENCE_PERSIST_MS: how long a detected presence is considered valid after last trigger.
 // PI_COMMAND_OVERRIDE_MS: how long a Pi command keeps the Arduino in Pi-controlled mode.
 #define SERIAL_BAUD               115200
@@ -27,10 +27,14 @@ const unsigned long PI_COMMAND_OVERRIDE_MS  = 5000UL;
 // TEMPERATURE THRESHOLDS (°C) 
 // TEMP_THRESHOLD: minimum temperature at which the fan logic will consider turning on.
 // T1/T2/T3: tiered thresholds used to select LOW/MED/HIGH fan levels when temperature is high.
-const int TEMP_THRESHOLD = 15;  // minimum temp to activate fan
-const int T1 = 28;              // >= T1  → FAN_LOW
-const int T2 = 30;              // >= T2  → FAN_MED
-const int T3 = 32;              // >= T3  → FAN_HIGH
+// FALLBACK_TEMP_THRESHOLD: temp-only activation point used when the Pi is offline
+//   and presence can no longer be confirmed by the camera (raised so the fan only
+//   runs when it is genuinely warm).
+const int TEMP_THRESHOLD = 15;          // minimum temp to activate fan
+const int T1 = 28;                       // >= T1  → FAN_LOW
+const int T2 = 30;                       // >= T2  → FAN_MED
+const int T3 = 32;                       // >= T3  → FAN_HIGH
+const int FALLBACK_TEMP_THRESHOLD = 26;  // temp-only activation when Pi is offline
 
 // FAN LEVELS
 // FanLevel is an enum for readability. The sketch uses digital on/off control:
@@ -67,7 +71,8 @@ int   ultra_counter  = 0;
 
 // sendTelemetry: build a small JSON object and send it over Serial.
 // The telemetry object contains timestamp, temperature,
-// ultrasonic reading and baseline, camera occupant count, and current fan level.
+// ultrasonic reading and baseline, camera occupant count, current fan level,
+// and the active control mode (supervised or fallback).
 // The Pi expects newline-terminated JSON lines.
 void sendTelemetry(long dist) {
   StaticJsonDocument<256> doc;
@@ -78,6 +83,9 @@ void sendTelemetry(long dist) {
   t["ultra_baseline"] = (ultra_baseline > 0.0f) ? ultra_baseline : -1;
   t["count"]         = occupantCount;
   t["fan_level"]     = (int)currentFan;
+  // Report control mode so the Pi/dashboard can see when we are in fallback
+  bool pi_alive = (millis() - lastHeartbeat) < HEARTBEAT_TIMEOUT_MS;
+  t["mode"]          = pi_alive ? "supervised" : "fallback";
   serializeJson(doc, Serial);
   Serial.println();
 }
@@ -112,16 +120,25 @@ void setFanLevel(FanLevel level) {
   }
 }
 
-// enforceSafeDefault: helper to force fan off.
-void enforceSafeDefault() {
-  setFanLevel(FanLevel::FAN_OFF);
+// runFallbackThermostat: autonomous mode used when the Pi heartbeat is lost.
+// With the Pi offline the camera can no longer confirm presence, so the fan
+// runs on temperature alone using FALLBACK_TEMP_THRESHOLD. This keeps the pet
+// cooled when warm while ensuring the fan is never left running uncontrolled.
+void runFallbackThermostat() {
+  FanLevel desired = FanLevel::FAN_OFF;
+  if (!isnan(lastTemp) && lastTemp >= FALLBACK_TEMP_THRESHOLD) {
+    if      (lastTemp >= T3) desired = FanLevel::FAN_HIGH;
+    else if (lastTemp >= T2) desired = FanLevel::FAN_MED;
+    else                     desired = FanLevel::FAN_LOW;
+  }
+  setFanLevel(desired);
 }
 
 
 // COMMAND HANDLER
 // handleCommand parses newline-terminated JSON commands from the Pi.
 // Supported commands:
-//  - heartbeat: updates lastHeartbeat so watchdog doesn't disable fan.
+//  - heartbeat: updates lastHeartbeat so watchdog stays in supervised mode.
 //  - set_fan: immediate fan override from Pi (also updates lastPiCommand).
 //  - set_count: camera-provided occupant count (does NOT update lastPiCommand).
 //  - presence: explicit presence flag (sets lastPresenceTime).
@@ -135,7 +152,7 @@ void handleCommand(const String &line) {
   const char* cmd = doc["cmd"];
 
   if (strcmp(cmd, "heartbeat") == 0) {
-    // Pi heartbeat keeps Arduino from reverting to safe default
+    // Pi heartbeat keeps Arduino in supervised mode (not fallback)
     lastHeartbeat = millis();
     Serial.println("[DBG] got heartbeat");
 
@@ -156,7 +173,7 @@ void handleCommand(const String &line) {
     // Camera reports occupant count; used by autonomous logic but does not
     // count as a Pi override (so Arduino can still run its own policy).
     occupantCount = doc["count"];
-    // lastPiCommand intentionally NOT updated here (see FIX above)
+    // lastPiCommand intentionally NOT updated here (see note above)
     Serial.print("[DBG] set_count -> ");
     Serial.println(occupantCount);
 
@@ -202,7 +219,7 @@ void setup() {
 
   lastTelemetry  = millis();
   lastDHTRead    = millis();
-  lastHeartbeat  = millis();
+  lastHeartbeat  = millis();  // start in supervised mode, not fallback
   lastPresenceTime = 0;
 
   Serial.println("[INFO] HotDog controller starting");
@@ -210,9 +227,9 @@ void setup() {
 
 
 // LOOP
-// Main loop: process incoming serial commands, maintain heartbeat watchdog,
-// read sensors on a schedule, update ultrasonic baseline and presence debounce,
-// and run autonomous fan control when Pi is not actively overriding.
+// Main loop: process incoming serial commands, read sensors on a schedule,
+// update ultrasonic baseline and presence debounce, and select one of three
+// control modes (fallback when Pi offline, Pi-controlled, or Pi-supervised).
 void loop() {
   // Read incoming serial commands from Pi
   while (Serial.available()) {
@@ -220,10 +237,7 @@ void loop() {
     handleCommand(line);
   }
 
-  // Heartbeat watchdog — if Pi goes silent, default to safe (fan off)
-  if (millis() - lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
-    enforceSafeDefault();
-  }
+  // Heartbeat freshness is evaluated in the 1 Hz block below (mode selection)
 
   // DHT22 read (max 1 read per 2.5 s per datasheet)
   if (millis() - lastDHTRead >= DHT_INTERVAL_MS) {
@@ -269,15 +283,28 @@ void loop() {
       lastPresenceTime = millis();
     }
 
-    // Autonomous fan control (only when Pi is not actively overriding)
+    // Control mode selection (priority order):
+    //  - fallback: Pi heartbeat lost → run standalone temperature-only thermostat
+    //  - Pi-controlled: Pi issued a recent set_fan → hold its commanded level
+    //  - Pi-supervised: presence-gated temperature control (normal operation)
+    bool pi_alive          = (millis() - lastHeartbeat) < HEARTBEAT_TIMEOUT_MS;
     bool pi_control_active = (millis() - lastPiCommand) < PI_COMMAND_OVERRIDE_MS;
 
-    if (!pi_control_active) {
+    if (!pi_alive) {
+      // Pi offline — run as a standalone temperature-only thermostat
+      runFallbackThermostat();
+      Serial.println("[DBG] MODE: fallback thermostat (Pi heartbeat lost)");
+
+    } else if (pi_control_active) {
+      // Pi is in control — reassert the last commanded level
+      setFanLevel(currentFan);
+
+    } else {
+      // Pi-supervised autonomous control
       // Determine whether presence is currently considered true
       bool present = (millis() - lastPresenceTime) < PRESENCE_PERSIST_MS;
       FanLevel desired = FanLevel::FAN_OFF;
 
-      // Temperature-tiered fan levels now all above TEMP_THRESHOLD
       // Only consider turning the fan on if temperature is above TEMP_THRESHOLD
       // and presence is detected. Then choose a level based on T1/T2/T3.
       if (!isnan(lastTemp) && lastTemp >= TEMP_THRESHOLD && present) {
@@ -300,12 +327,11 @@ void loop() {
 
       // Apply autonomous decision
       setFanLevel(desired);
-    } else {
-      // Pi is in control — reassert the last commanded level
-      setFanLevel(currentFan);
     }
 
     // Send telemetry to Pi for logging and decision-making on the Pi side
     sendTelemetry(dist);
+  }
+}
   }
 }
