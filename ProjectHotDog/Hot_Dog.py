@@ -8,6 +8,13 @@ import os
 import argparse
 from datetime import datetime
 
+# MQTT publisher is optional; the system still runs if it is unavailable.
+try:
+    from mqtt_publisher import MqttPublisher
+    MQTT_AVAILABLE = True
+except ImportError:
+    MQTT_AVAILABLE = False
+
 # CONFIG
 # Camera and serial configuration and tuning constants.
 
@@ -22,6 +29,12 @@ HEARTBEAT_INTERVAL_S = 1.0
 
 TELEMETRY_LOG = 'telemetry.csv'
 SHOW_WINDOW_DEFAULT = False
+
+# MQTT
+# Broker connection details. Mosquitto runs locally on the Pi and Node-RED
+# subscribes to the published topics for email alerts and the dashboard.
+MQTT_HOST = 'localhost'
+MQTT_PORT = 1883
 
 # Camera tuning
 # MIN_CONTOUR_AREA: ignore blobs smaller (reduces false positives)
@@ -46,6 +59,15 @@ BASELINE_MIN_VALID_CM = 30        # ignore obviously invalid baseline values bel
 # Temperature threshold (must match Arduino TEMP_THRESHOLD)
 # The Pi will only request fan activation when Arduino reports temp >= this value.
 TEMP_THRESHOLD = 15
+
+# Energy conservation (presence-gated sensing)
+# The camera pipeline is the heaviest CPU/power consumer, so it only runs when
+# the pet is (or may be) present. ACTIVE = full camera pipeline; IDLE = camera
+# skipped, only the cheap ultrasonic telemetry is polled until something approaches.
+ENERGY_SAVING_ENABLED = True      # master switch for ACTIVE/IDLE sensing
+IDLE_POLL_INTERVAL_S = 3.0        # seconds between ultrasonic checks while IDLE
+ACTIVE_HOLD_S = 30.0             # stay ACTIVE this long after the last presence
+IDLE_WAKE_DELTA_CM = 20           # ultrasonic drop below baseline that wakes the camera
 
 # GLOBALS
 # latest_telemetry stores the most recent telemetry object received from Arduino.
@@ -206,11 +228,15 @@ def presence_to_fan_level(score):
 # MAIN 
 # The main loop captures frames, estimates camera counts, reads Arduino telemetry,
 # maintains an ultrasonic baseline, fuses sensors, and sends set_fan commands.
+# It also publishes telemetry/events to MQTT and gates the camera pipeline for
+# energy conservation when no pet is present.
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--serial', default=SERIAL_PORT)
     parser.add_argument('--show', action='store_true',
                         default=SHOW_WINDOW_DEFAULT)
+    parser.add_argument('--mqtt-host', default=MQTT_HOST)
+    parser.add_argument('--no-mqtt', action='store_true')   # disable MQTT publishing
     args = parser.parse_args()
 
     # Create Arduino serial helper and attempt to open the port.
@@ -218,8 +244,23 @@ def main():
     if not ard.open():
         print("Serial not available at startup; will retry in main loop.")
 
-    # Open camera capture and set parameters
-    cap = cv2.VideoCapture(CAM_INDEX)
+    # MQTT is optional: if the broker or library is unavailable, core control
+    # still runs and only notifications/dashboard are lost (graceful degradation).
+    mqtt_pub = None
+    if not args.no_mqtt and MQTT_AVAILABLE:
+        mqtt_pub = MqttPublisher(host=args.mqtt_host, port=MQTT_PORT)
+        if mqtt_pub.connect():
+            print("MQTT publisher started ->", args.mqtt_host)
+        else:
+            print("MQTT connect failed; continuing without notifications.")
+            mqtt_pub = None
+    elif not MQTT_AVAILABLE:
+        print("paho-mqtt not installed; continuing without notifications.")
+
+    # Open camera capture and set parameters.
+    # Force the V4L2 backend: on Raspberry Pi OS the default GStreamer pipeline
+    # often fails to open USB webcams ("Internal data stream error").
+    cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
     cap.set(cv2.CAP_PROP_FPS, FPS)
@@ -243,6 +284,16 @@ def main():
     empty_start_ts = None
     ultra_counter = 0
 
+    # Event edge-detection state: publish MQTT events only on transitions,
+    # not every cycle, so the user is not flooded with duplicate emails.
+    prev_temp_exceeded = False
+    prev_fan_on = False
+
+    # Energy-saving state: ACTIVE = full camera pipeline, IDLE = ultrasonic poll only.
+    sensing_active = True            # start ACTIVE so the baseline can establish
+    last_active_ts = time.time()
+    prev_sensing_active = True
+
     print("Starting capture loop. Press Ctrl-C to stop.")
     try:
         while True:
@@ -255,9 +306,38 @@ def main():
                     continue
 
             t0 = time.time()
+
+            # Energy-saving gate: while IDLE, skip the camera pipeline entirely
+            # and just poll the Arduino's ultrasonic telemetry. Wake to ACTIVE
+            # if something is detected approaching the bed.
+            if ENERGY_SAVING_ENABLED and not sensing_active:
+                tele_idle = ard.get_latest()
+                d_idle = tele_idle.get('ultra_cm', -1) if tele_idle else -1
+                b_idle = tele_idle.get('ultra_baseline', None) if tele_idle else None
+                # Wake if a valid reading is meaningfully closer than the baseline
+                woke = (b_idle is not None and float(b_idle) > BASELINE_MIN_VALID_CM
+                        and isinstance(d_idle, (int, float)) and d_idle > 0
+                        and d_idle < (float(b_idle) - IDLE_WAKE_DELTA_CM))
+                if woke:
+                    sensing_active = True
+                    last_active_ts = time.time()
+                    print("[ENERGY] Wake -> ACTIVE (ultrasonic detected approach)")
+                else:
+                    # Still idle: publish a light telemetry update for the dashboard,
+                    # then sleep for the slow poll interval and skip the camera.
+                    if mqtt_pub is not None and tele_idle is not None:
+                        mqtt_pub.publish_telemetry({"ts": time.time(),
+                                                    "temp": tele_idle.get('temp'),
+                                                    "ultra_cm": d_idle,
+                                                    "count": 0, "score": 0,
+                                                    "fan_level": tele_idle.get('fan_level', 0),
+                                                    "sensing": "idle"})
+                    time.sleep(IDLE_POLL_INTERVAL_S)
+                    continue
+
             ret, frame = cap.read()
             if not ret:
-                # Camera read failed; wait briefly and retry
+                # Camera read failed then wait briefly and retry
                 time.sleep(0.1)
                 continue
 
@@ -265,8 +345,8 @@ def main():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             count, fgmask, boxes = estimate_count(gray, bg_sub)
 
-            # FIX: debounce camera count
-            # Accumulate counter while count stays the same; reset on change.
+            # Debounce camera count
+            # Accumulate counter while count stays the same then reset on change.
             if count == stable_count:
                 stable_counter += 1
                 if stable_counter >= STABLE_FRAMES_REQUIRED:
@@ -341,9 +421,22 @@ def main():
             if sensor_presence:
                 presence_score += 1
 
+            # Energy-saving: drop to IDLE after a sustained absence, and announce
+            # ACTIVE/IDLE transitions over MQTT so the dashboard can show the state.
+            if presence_score > 0:
+                last_active_ts = now
+            if ENERGY_SAVING_ENABLED and sensing_active and (now - last_active_ts) >= ACTIVE_HOLD_S:
+                sensing_active = False
+                print("[ENERGY] No presence; sleeping -> IDLE")
+            if sensing_active != prev_sensing_active:
+                if mqtt_pub is not None:
+                    mqtt_pub.publish_event("sensing_active" if sensing_active else "sensing_idle", {})
+                prev_sensing_active = sensing_active
+
             # Decision: only attempt to turn fan on if Arduino reports temp >= threshold
+            temp_exceeded = temp is not None and temp >= TEMP_THRESHOLD
             desired_fan = 0
-            if temp is not None and temp >= TEMP_THRESHOLD and presence_score > 0:
+            if temp_exceeded and presence_score > 0:
                 desired_fan = presence_to_fan_level(presence_score)
 
             # Send set_fan only when level changes
@@ -353,6 +446,26 @@ def main():
                 send_ok = ard.send({"cmd": "set_fan", "level": int(desired_fan)})
                 print("Sent set_fan", desired_fan, "ok?", send_ok)
                 note = "sent_ok" if send_ok else "send_FAILED"
+
+            # MQTT publishing: full telemetry every cycle (for the dashboard) and
+            # discrete events only on rising/falling edges (for email alerts).
+            if mqtt_pub is not None:
+                mqtt_pub.publish_telemetry({"ts": now, "temp": temp, "ultra_cm": dist,
+                                            "baseline": round(ultra_baseline, 1) if ultra_baseline else None,
+                                            "count": stable_count, "score": presence_score,
+                                            "fan_level": desired_fan})
+                # Temperature crossed above threshold
+                if temp_exceeded and not prev_temp_exceeded:
+                    mqtt_pub.publish_event("temp_exceeded", {"temp": temp, "threshold": TEMP_THRESHOLD})
+                # Fan turned on / off
+                fan_on = desired_fan > 0
+                if fan_on and not prev_fan_on:
+                    mqtt_pub.publish_event("fan_on", {"level": desired_fan, "temp": temp})
+                elif not fan_on and prev_fan_on:
+                    mqtt_pub.publish_event("fan_off", {"temp": temp})
+                # Remember this cycle's state for next iteration's edge detection
+                prev_temp_exceeded = temp_exceeded
+                prev_fan_on = fan_on
 
             # Log telemetry row for offline analysis and tuning
             row = [
@@ -390,11 +503,12 @@ def main():
         print("Stopping...")
 
     finally:
-        # Cleanup resources: release camera, close windows, close serial
+        # Cleanup resources: release camera, close windows, close serial, stop MQTT
         cap.release()
         cv2.destroyAllWindows()
         ard.close()
-
+        if mqtt_pub is not None:
+            mqtt_pub.disconnect()
 
 if __name__ == '__main__':
     main()
